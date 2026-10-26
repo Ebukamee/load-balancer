@@ -1,0 +1,15 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose     # forgot to close an http.Response body (leaks connections)
+    - errorlint     # wrong error comparisons (use errors.Is / errors.As)
+    - gosec         # common security mistakes
+    - misspell
+    - revive        # style, a successor to golint
+    - unconvert
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

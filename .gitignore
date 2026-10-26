@@ -1,0 +1,13 @@
+# Build output
+bin/
+*.exe
+*.test
+coverage.out
+
+# Editors
+.idea/
+.vscode/
+
+# Personal learning guide (kept out of git on purpose)
+LEARNING_GUIDE.pdf
+.learning/

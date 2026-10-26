@@ -1,0 +1,685 @@
+so i want to build a load balancer in Go as a learning experiene in my plan to become an infrastructure Engineer. So setup the pipeline/codebase and then tell me learning outcomes and steps ill take to build this with your help
+Bash Inspect project folder and available tooling
+IN
+cd "/c/Users/HP/desktop/load balancer" && ls -la && git rev-parse --show-toplevel; go version; docker --version; make --version 2>&1 | head -1; golangci-lint --version 2>&1 | head -1
+
+OUT
+total 48
+drwxr-xr-x 1 HP 197121 0 Oct 15 14:29 .
+drwxr-xr-x 1 HP 197121 0 Oct 15 14:29 ..
+C:/Users/HP
+go version go1.27.1 windows/amd64
+/usr/bin/bash: line 1: docker: command not found
+/usr/bin/bash: line 1: make: command not found
+/usr/bin/bash: line 1: golangci-lint: command not found
+The folder is empty and currently tracked under the home directory's git repo, so I'll give the project its own dedicated repo. Go 1.27 is installed but Docker and make aren't, so I'll make sure everything also works with plain go commands.
+Bash Init git repo, Go module, and directory layout
+IN
+cd "/c/Users/HP/desktop/load balancer" && git init -b main -q && go mod init loadbalancer && mkdir -p cmd/lb cmd/backend internal/config internal/backend internal/balancer configs .github/workflows && cat go.mod
+
+OUT
+go: creating new go.mod: module loadbalancer
+module loadbalancer
+
+go 1.27.1
+Write C:\Users\HP\desktop\load balancer\internal\config\config.go
+87 lines
+// Package config loads and validates the load balancer's JSON configuration.
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"time"
+)
+
+// Config is the top-level configuration for the load balancer.
+type Config struct {
+	ListenAddr  string      `json:"listen_addr"`
+	Strategy    string      `json:"strategy"`
+	HealthCheck HealthCheck `json:"health_check"`
+	Backends    []string    `json:"backends"`
+}
+
+// HealthCheck controls how backends are probed (used from Milestone 3).
+type HealthCheck struct {
+	Path     string   `json:"path"`
+	Interval Duration `json:"interval"`
+	Timeout  Duration `json:"timeout"`
+}
+
+// Duration wraps time.Duration so it can be written as "5s" in JSON.
+type Duration struct{ time.Duration }
+
+// UnmarshalJSON parses strings like "500ms" or "5s".
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("duration must be a string like \"5s\": %w", err)
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	d.Duration = v
+	return nil
+}
+
+// Load reads, decodes and validates the config file at path.
+func Load(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var cfg Config
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	return &cfg, nil
+}
+
+// Validate checks that the config is usable.
+func (c *Config) Validate() error {
+	if c.ListenAddr == "" {
+		return errors.New("listen_addr is required")
+	}
+	if len(c.Backends) == 0 {
+		return errors.New("at least one backend is required")
+	}
+	for _, raw := range c.Backends {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("backend %q: %w", raw, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("backend %q: scheme must be http or https", raw)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("backend %q: missing host", raw)
+		}
+	}
+	return nil
+}
+Write C:\Users\HP\desktop\load balancer\internal\config\config_test.go
+52 lines
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{"valid", Config{ListenAddr: ":8080", Backends: []string{"http://localhost:9001"}}, false},
+		{"missing listen addr", Config{Backends: []string{"http://localhost:9001"}}, true},
+		{"no backends", Config{ListenAddr: ":8080"}, true},
+		{"bad scheme", Config{ListenAddr: ":8080", Backends: []string{"ftp://localhost:9001"}}, true},
+		{"missing host", Config{ListenAddr: ":8080", Backends: []string{"http://"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{
+		"listen_addr": ":8080",
+		"strategy": "round_robin",
+		"health_check": {"path": "/healthz", "interval": "5s", "timeout": "1s"},
+		"backends": ["http://localhost:9001"]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.HealthCheck.Interval.Duration != 5*time.Second {
+		t.Errorf("interval = %v, want 5s", cfg.HealthCheck.Interval)
+	}
+}
+Write C:\Users\HP\desktop\load balancer\internal\backend\backend.go
+38 lines
+// Package backend models a single upstream server the load balancer forwards to.
+package backend
+
+import (
+	"fmt"
+	"net/url"
+	"sync/atomic"
+)
+
+// Backend is one upstream server.
+//
+// It is read by many request goroutines at once and written by the health
+// checker, so every mutable field must be safe for concurrent use.
+type Backend struct {
+	URL   *url.URL
+	alive atomic.Bool
+
+	// TODO(M1): add a *httputil.ReverseProxy that forwards requests to URL.
+	// TODO(M5): add an active-connection counter for least-connections.
+}
+
+// New parses rawURL and returns a Backend that starts out alive.
+func New(rawURL string) (*Backend, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse backend url: %w", err)
+	}
+	b := &Backend{URL: u}
+	b.alive.Store(true)
+	return b, nil
+}
+
+// Alive reports whether the backend is currently considered healthy.
+func (b *Backend) Alive() bool { return b.alive.Load() }
+
+// SetAlive marks the backend healthy or unhealthy.
+func (b *Backend) SetAlive(v bool) { b.alive.Store(v) }
+Write C:\Users\HP\desktop\load balancer\internal\balancer\balancer.go
+14 lines
+// Package balancer contains the strategies that pick which backend serves a request.
+package balancer
+
+import "loadbalancer/internal/backend"
+
+// Strategy picks the next backend to send a request to.
+//
+// Implementations must be safe for concurrent use: Next is called from every
+// request goroutine at the same time. It should skip backends that are not
+// alive and return nil when none are available.
+type Strategy interface {
+	Next(backends []*backend.Backend) *backend.Backend
+}
+Write C:\Users\HP\desktop\load balancer\internal\balancer\roundrobin.go
+16 lines
+package balancer
+
+import "loadbalancer/internal/backend"
+
+// RoundRobin hands out backends in turn: 1, 2, 3, 1, 2, 3, ...
+type RoundRobin struct {
+	// TODO(M2): add a counter. Think about what happens when 1,000
+	// goroutines call Next at the same time (hint: sync/atomic).
+}
+
+// Next implements Strategy.
+func (r *RoundRobin) Next(backends []*backend.Backend) *backend.Backend {
+	// TODO(M2): implement, then remove the t.Skip in roundrobin_test.go.
+	return nil
+}
+Write C:\Users\HP\desktop\load balancer\internal\balancer\roundrobin_test.go
+63 lines
+package balancer
+
+import (
+	"testing"
+
+	"loadbalancer/internal/backend"
+)
+
+func mustBackends(t *testing.T, urls ...string) []*backend.Backend {
+	t.Helper()
+	out := make([]*backend.Backend, 0, len(urls))
+	for _, u := range urls {
+		b, err := backend.New(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// These tests are the spec for Milestone 2. Remove the t.Skip lines once
+// RoundRobin is implemented, then run: go test -race ./...
+
+func TestRoundRobinCycles(t *testing.T) {
+	t.Skip("TODO(M2): implement RoundRobin.Next")
+
+	bs := mustBackends(t, "http://a:1", "http://b:2", "http://c:3")
+	rr := &RoundRobin{}
+
+	for i := range 6 {
+		got := rr.Next(bs)
+		want := bs[i%len(bs)]
+		if got != want {
+			t.Fatalf("call %d: got %v, want %v", i, got.URL, want.URL)
+		}
+	}
+}
+
+func TestRoundRobinSkipsDeadBackends(t *testing.T) {
+	t.Skip("TODO(M2): implement RoundRobin.Next")
+
+	bs := mustBackends(t, "http://a:1", "http://b:2", "http://c:3")
+	bs[1].SetAlive(false)
+	rr := &RoundRobin{}
+
+	for i := range 10 {
+		if got := rr.Next(bs); got == bs[1] {
+			t.Fatalf("call %d returned a dead backend", i)
+		}
+	}
+}
+
+func TestRoundRobinAllDead(t *testing.T) {
+	t.Skip("TODO(M2): implement RoundRobin.Next")
+
+	bs := mustBackends(t, "http://a:1")
+	bs[0].SetAlive(false)
+	if got := (&RoundRobin{}).Next(bs); got != nil {
+		t.Fatalf("got %v, want nil when every backend is dead", got.URL)
+	}
+}
+Write C:\Users\HP\desktop\load balancer\cmd\lb\main.go
+71 lines
+// Command lb is the load balancer.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"loadbalancer/internal/config"
+)
+
+func main() {
+	configPath := flag.String("config", "configs/config.json", "path to config file")
+	flag.Parse()
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	if err := run(*configPath, logger); err != nil {
+		logger.Error("fatal", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(configPath string, logger *slog.Logger) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	// TODO(M1): build backends from cfg.Backends and forward requests to them
+	// instead of returning 503.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no backends wired up yet", http.StatusServiceUnavailable)
+	})
+
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Stop cleanly on Ctrl+C / SIGTERM so in-flight requests can finish.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("load balancer listening", "addr", cfg.ListenAddr, "backends", len(cfg.Backends))
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+		logger.Info("shutting down")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+Write C:\Users\HP\desktop\load balancer\cmd\backend\main.go
+51 lines
+// Command backend is a tiny HTTP server used as an upstream while developing
+// the load balancer. Run several on different ports to see traffic spread out.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"time"
+)
+
+func main() {
+	addr := flag.String("addr", ":9001", "listen address")
+	name := flag.String("name", "", "name reported in responses (defaults to addr)")
+	flag.Parse()
+	if *name == "" {
+		*name = *addr
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	// /slow?d=2s simulates a slow backend, useful for testing timeouts.
+	mux.HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
+		d, err := time.ParseDuration(r.URL.Query().Get("d"))
+		if err != nil {
+			d = 2 * time.Second
+		}
+		select {
+		case <-time.After(d):
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprintf(w, "slow response from %s after %s\n", *name, d)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello from %s (path=%s, x-forwarded-for=%q)\n",
+			*name, r.URL.Path, r.Header.Get("X-Forwarded-For"))
+	})
+
+	slog.Info("backend listening", "addr", *addr, "name", *name)
+	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Error("backend stopped", "err", err)
+		os.Exit(1)
+	}
+}
+Write C:\Users\HP\desktop\load balancer\configs\config.json
+15 lines
+{
+  "listen_addr": ":8080",
+  "strategy": "round_robin",
+  "health_check": {
+    "path": "/healthz",
+    "interval": "5s",
+    "timeout": "1s"
+  },
+  "backends": [
+    "http://localhost:9001",
+    "http://localhost:9002",
+    "http://localhost:9003"
+  ]
+}
+Write C:\Users\HP\desktop\load balancer\.github\workflows\ci.yml
+39 lines
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (with race detector)
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Build
+        run: go build -o bin/ ./cmd/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+Write C:\Users\HP\desktop\load balancer\.golangci.yml
+16 lines
+version: "2"
+
+linters:
+  # The defaults (errcheck, govet, ineffassign, staticcheck, unused) plus:
+  enable:
+    - bodyclose   # forgetting resp.Body.Close() leaks connections
+    - errorlint   # wrap/compare errors correctly with %w and errors.Is
+    - gosec       # common security mistakes
+    - misspell
+    - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+Write C:\Users\HP\desktop\load balancer\Makefile
+27 lines
+.PHONY: run backends test race lint build fmt
+
+run:
+	go run ./cmd/lb -config configs/config.json
+
+# Start three demo backends in the background (Ctrl+C stops them).
+backends:
+	go run ./cmd/backend -addr :9001 -name b1 & \
+	go run ./cmd/backend -addr :9002 -name b2 & \
+	go run ./cmd/backend -addr :9003 -name b3 & \
+	wait
+
+test:
+	go test ./...
+
+race:
+	go test -race ./...
+
+lint:
+	golangci-lint run
+
+fmt:
+	gofmt -w .
+
+build:
+	go build -o bin/ ./cmd/...
+Write C:\Users\HP\desktop\load balancer\.gitignore
+7 lines
+bin/
+*.exe
+coverage.out
+*.test
+.idea/
+.vscode/
+2:41 PM
+Now the README with the roadmap, plus small fixes so the linter won't flag the stubs:
+
+
+
+Bash Silence unused-parameter and gosec lint warnings in stubs
+IN
+cd "/c/Users/HP/desktop/load balancer" && \
+sed -i 's|func(w http.ResponseWriter, r \*http.Request) {\n\t\tw.WriteHeader|&|' cmd/backend/main.go && \
+sed -i 's|mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r \*http.Request) {|mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {|' cmd/backend/main.go && \
+sed -i 's|handler := http.HandlerFunc(func(w http.ResponseWriter, r \*http.Request) {|handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {|' cmd/lb/main.go && \
+sed -i 's|\treturn nil$|\t_ = backends\n\treturn nil|' internal/balancer/roundrobin.go && \
+sed -i 's|\tf, err := os.Open(path)|\tf, err := os.Open(path) //nolint:gosec // path comes from the operator via -config|' internal/config/config.go && \
+grep -n "_ \*http\|_ = backends\|nolint" -r cmd internal
+
+OUT
+cmd/backend/main.go:23:	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+cmd/lb/main.go:38:	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+internal/balancer/roundrobin.go:14:	_ = backends
+internal/config/config.go:47:	f, err := os.Open(path) //nolint:gosec // path comes from the operator via -config
+Write C:\Users\HP\desktop\load balancer\README.md
+59 lines
+# Go Load Balancer
+
+An HTTP (L7) load balancer built from scratch in Go, as a learning project on the path to infrastructure engineering.
+
+## Layout
+
+```
+cmd/lb/            the load balancer binary
+cmd/backend/       a tiny demo upstream server (/, /healthz, /slow?d=2s)
+internal/config/   JSON config loading + validation
+internal/backend/  one upstream server and its health state
+internal/balancer/ strategies that choose a backend (round robin, ...)
+configs/           example config
+.github/workflows/ CI: gofmt, go vet, go test -race, build, golangci-lint
+```
+
+## Running locally
+
+`make` isn't required. These are the plain Go commands (they work in Git Bash on Windows):
+
+```bash
+# terminal 1-3: start demo backends
+go run ./cmd/backend -addr :9001 -name b1
+go run ./cmd/backend -addr :9002 -name b2
+go run ./cmd/backend -addr :9003 -name b3
+
+# terminal 4: start the load balancer
+go run ./cmd/lb -config configs/config.json
+
+# terminal 5: send traffic
+for i in 1 2 3 4 5 6; do curl -s localhost:8080; done
+```
+
+Checks (the same ones CI runs):
+
+```bash
+gofmt -l .
+go vet ./...
+go test -race ./...    # -race needs cgo/gcc on Windows; CI runs it on Linux
+```
+
+## Roadmap
+
+Each milestone ends with working code, tests, and a green CI run. `TODO(Mx)` comments in the code mark where each one starts.
+
+| # | Milestone | You'll learn |
+|---|-----------|--------------|
+| 0 | Project setup *(done)* | Go modules, project layout, CI |
+| 1 | Reverse proxy to one backend | `net/http`, `httputil.ReverseProxy`, X-Forwarded-For, hop-by-hop headers |
+| 2 | Round robin across N backends | Interfaces, data races, `sync/atomic`, `go test -race` |
+| 3 | Active health checks | Goroutines, `time.Ticker`, `context` cancellation, timeouts |
+| 4 | Passive checks + retries | Proxy error handling, idempotent methods, retry budgets |
+| 5 | More strategies | Least-connections, weighted RR, consistent hashing, benchmarks |
+| 6 | Production hardening | Server/Transport timeouts, connection pooling, graceful draining |
+| 7 | Observability | Structured logs, Prometheus metrics, latency histograms, pprof |
+| 8 | Load testing | `hey`/`vegeta`, p50/p99 latency, finding bottlenecks |
+| 9 | Packaging and deploying | Multi-stage Dockerfile, docker-compose, Kubernetes (kind) |
+| 10 | Stretch goals | L4 TCP balancing, hot config reload, TLS termination, rate limiting |
+2:42 PM
+Now let's verify everything builds, passes, and runs end to end:
+
+
+
+Bash Format check, vet, test, build, and smoke-test binaries
+IN
+cd "/c/Users/HP/desktop/load balancer" && echo "gofmt:" && gofmt -l . && go vet ./... && go test ./... && go build -o bin/ ./cmd/... && ls bin && \
+(./bin/backend.exe -addr :9001 -name b1 >/dev/null 2>&1 & ./bin/lb.exe -config configs/config.json > "$TEMP/lb.log" 2>&1 & sleep 2; curl -s -i localhost:8080 | head -1; curl -s localhost:9001; cat "$TEMP/lb.log"; taskkill //F //IM lb.exe >/dev/null; taskkill //F //IM backend.exe >/dev/null); rm -rf bin
+
+OUT
+gofmt:
+?   	loadbalancer/cmd/backend	[no test files]
+?   	loadbalancer/cmd/lb	[no test files]
+?   	loadbalancer/internal/backend	[no test files]
+ok  	loadbalancer/internal/balancer	1.044s
+ok  	loadbalancer/internal/config	1.957s
+backend.exe
+lb.exe
+HTTP/1.1 503 Service Unavailable
+hello from b1 (path=/, x-forwarded-for="")
+time=2026-10-15T14:46:00.089+01:00 level=INFO msg="load balancer listening" addr=:8080 backends=3
+2:46 PM
+I've set up the project and checked that it works. Formatting, go vet and the tests all pass, and both binaries build and run. Right now the load balancer starts on :8080 and returns 503 "no backends wired up yet". That's on purpose: forwarding the requests is your job in Milestone 1. The demo backend already responds normally.
+
+What's in the project
+Path	Purpose
+cmd/lb/main.go	Entry point. It loads the config, starts the server and shuts down cleanly on Ctrl+C. The handler is a placeholder.
+cmd/backend/main.go	A demo server to put behind the load balancer. It has /, /healthz and /slow?d=2s (a deliberately slow response for testing timeouts).
+internal/config/	Reads and checks configs/config.json. Fully working, with tests.
+internal/backend/	Represents one backend server and whether it's healthy, stored safely for concurrent access.
+internal/balancer/	The Strategy interface, plus a RoundRobin stub for you to fill in.
+roundrobin_test.go	Tests that define what Milestone 2 must do. They're skipped for now; remove the t.Skip lines to start.
+.github/workflows/ci.yml	The CI pipeline: formatting check, go vet, tests with the race detector, build, and golangci-lint.
+README.md	How to run it, and the roadmap below.
+Things to know:
+
+Separate repo: your git repo was rooted at C:\Users\HP (your whole home folder), so I ran git init inside this folder to give the project its own repo. I haven't committed anything yet.
+CI: the pipeline only runs once you push to GitHub.
+Missing tools: make and Docker aren't installed, so the README lists the plain go run commands. Docker comes in at Milestone 9. go test -race needs gcc on Windows, but CI runs it on Linux, so you're still covered.
+What you'll learn
+By the end you should be able to explain and build:
+
+How a reverse proxy works: headers, connection reuse, and what happens to a request between the client and the backend.
+Concurrency in Go: goroutines, context, atomic operations, mutexes, and finding data races.
+Reliability patterns: health checks, retries, timeouts, handling failures, and draining connections before shutdown.
+Load-balancing algorithms and their trade-offs: round robin, least connections, weighted, and consistent hashing.
+Observability: metrics, latency percentiles, profiling, and load testing.
+Shipping it: containers, compose files and Kubernetes, which is the core of day-to-day infrastructure work.
+The steps
+#	Milestone	Main concept
+0	✅ Setup	Project layout, CI
+1	Forward requests to one backend	httputil.ReverseProxy
+2	Round robin across 3 backends	Data races and sync/atomic
+3	Active health checks	Goroutines, tickers, context
+4	Passive checks and retries	Error handling, which requests are safe to retry
+5	Least-connections, weighted, consistent hashing	Algorithms, benchmarks
+6	Timeouts, connection pooling, draining	Production hardening
+7	Prometheus metrics, pprof	Observability
+8	Load testing with hey or vegeta	p99 latency, finding bottlenecks
+9	Dockerfile, compose, Kubernetes (kind)	Deployment
+10	Stretch: TCP (L4) balancing, TLS, hot reload, rate limiting	Going deeper
+How we'll work together
+For each milestone, I'll explain the concept and point you to the right standard-library docs. You write the code, and I review it the way a senior engineer would review a PR: I'll catch races and leaks, and ask "what happens if…" questions. I'll give hints when you're stuck rather than full solutions, unless you ask for one. TODO(M1) and TODO(M2) comments in the code mark where each milestone starts.
+
+Your first task (Milestone 1): in cmd/lb/main.go, swap the 503 handler for one that forwards every request to http://localhost:9001. Start by reading the docs for httputil.NewSingleHostReverseProxy. When curl localhost:8080 shows "hello from b1", you're done.
+
+Want me to make the first commit, and help you set up the GitHub repo so CI runs?
+
+
+
+Idle 4d 19h. The prompt cache has likely expired, so your next message will re-cache about 49k tokens.
