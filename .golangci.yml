@@ -8,6 +8,12 @@ linters:
     - misspell
     - revive        # style, a successor to golint
     - unconvert
+  exclusions:
+    rules:
+      # Test backends echo request data on purpose so tests can inspect it;
+      # that is not a real XSS risk, so skip security checks in tests only.
+      - path: _test\.go
+        linters: [gosec]
 
 formatters:
   enable:
