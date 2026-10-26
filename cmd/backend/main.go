@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"time"
@@ -19,14 +20,20 @@ func main() {
 	delay := flag.Duration("delay", 0, "artificial delay per request (e.g. 200ms) to simulate a slow server")
 	flag.Parse()
 
+	// Write errors are deliberately ignored below: they only happen when the
+	// client has already gone away, and there is nobody left to tell.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ok")
+		_, _ = fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", *name)
 		time.Sleep(*delay)
-		fmt.Fprintf(w, "hello from %s (path=%s)\n", *name, r.URL.Path)
+		// The path is client input: escape it so it can never be echoed back
+		// as runnable HTML (reflected XSS).
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "hello from %s (path=%s)\n", *name, html.EscapeString(r.URL.Path))
 	})
 
 	srv := &http.Server{

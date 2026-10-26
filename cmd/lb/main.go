@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ebuka/loadbalancer/internal/proxy"
+	"github.com/Ebukamee/load-balancer/internal/proxy"
 )
 
 func main() {
