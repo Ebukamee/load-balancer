@@ -1,0 +1,2 @@
+# Go tools expect LF line endings; stop Windows git from converting to CRLF.
+* text=auto eol=lf
