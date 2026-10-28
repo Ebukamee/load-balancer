@@ -93,7 +93,6 @@ func (c *Checker) check(ctx context.Context, b *backend.Backend) bool {
 	defer resp.Body.Close()
 
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
-	return false
 }
 
 func upDown(alive bool) string {
