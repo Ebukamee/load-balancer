@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Ebukamee/load-balancer/internal/backend"
 	"github.com/Ebukamee/load-balancer/internal/balancer"
+	"github.com/Ebukamee/load-balancer/internal/health"
 	"github.com/Ebukamee/load-balancer/internal/lb"
 	"github.com/Ebukamee/load-balancer/internal/proxy"
 )
@@ -22,12 +24,18 @@ func main() {
 	backendList := flag.String("backends",
 		"http://localhost:7001,http://localhost:7002,http://localhost:7003",
 		"comma-separated backend URLs")
+	checkEvery := flag.Duration("health-interval", 5*time.Second, "time between health checks")
+	checkTimeout := flag.Duration("health-timeout", 2*time.Second, "how long one health check may take")
 	flag.Parse()
 
 	backends, err := parseBackends(*backendList)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Health checks run in the background for as long as the program runs.
+	// Step 9 cancels this context on Ctrl+C for a clean shutdown.
+	go health.New(backends, *checkEvery, *checkTimeout).Run(context.Background())
 
 	srv := &http.Server{
 		Addr:              *addr,

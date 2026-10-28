@@ -9,6 +9,9 @@ linters:
     - revive        # style, a successor to golint
     - unconvert
   exclusions:
+    # Allows well-known safe patterns such as `defer resp.Body.Close()`.
+    presets:
+      - std-error-handling
     rules:
       # Test backends echo request data on purpose so tests can inspect it;
       # that is not a real XSS risk, so skip security checks in tests only.
