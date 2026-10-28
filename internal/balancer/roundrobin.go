@@ -17,14 +17,21 @@ func NewRoundRobin(backends []*backend.Backend) *RoundRobin {
 	return &RoundRobin{backends: backends}
 }
 
-// Next returns the next backend in the rotation, or ErrNoBackends if the
-// list is empty. It is safe for concurrent use.
+// Next returns the next alive backend in the rotation, or ErrNoBackends if
+// none is alive. It is safe for concurrent use.
 func (rr *RoundRobin) Next() (*backend.Backend, error) {
 	if len(rr.backends) == 0 {
 		return nil, ErrNoBackends
 	}
-	n := rr.counter.Add(1)
-	i := n - 1
-	available := i % uint64(len(rr.backends))
-	return rr.backends[available], nil
+
+	for range len(rr.backends) {
+		n := rr.counter.Add(1)
+		i := n - 1
+		available := i % uint64(len(rr.backends))
+		b := rr.backends[available]
+		if b.IsAlive() {
+			return b, nil
+		}
+	}
+	return nil, ErrNoBackends
 }
