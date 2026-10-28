@@ -9,8 +9,7 @@ import (
 // RoundRobin hands out backends in a fixed rotation: b1, b2, b3, b1, ...
 type RoundRobin struct {
 	backends []*backend.Backend
-	counter atomic.Uint64
-	
+	counter  atomic.Uint64
 }
 
 // NewRoundRobin returns a RoundRobin over backends, starting with the first.
@@ -22,7 +21,7 @@ func NewRoundRobin(backends []*backend.Backend) *RoundRobin {
 // list is empty. It is safe for concurrent use.
 func (rr *RoundRobin) Next() (*backend.Backend, error) {
 	if len(rr.backends) == 0 {
-		return nil,ErrNoBackends
+		return nil, ErrNoBackends
 	}
 	n := rr.counter.Add(1)
 	i := n - 1

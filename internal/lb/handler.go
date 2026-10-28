@@ -3,8 +3,8 @@
 package lb
 
 import (
-	"net/http"
 	"log"
+	"net/http"
 
 	"github.com/Ebukamee/load-balancer/internal/balancer"
 )
@@ -33,12 +33,12 @@ func NewHandler(bal balancer.Balancer) http.Handler {
 	//
 	// Then run: go test ./internal/lb -v
 	_ = bal
-	return http.HandlerFunc(func(w http.ResponseWriter, r*http.Request) {
-		b,err := bal.Next()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := bal.Next()
 
 		if err != nil {
 			log.Printf("pick backend: %v", err)
-			http.Error(w,"no backends available",http.StatusServiceUnavailable)
+			http.Error(w, "no backends available", http.StatusServiceUnavailable)
 			return
 		}
 		b.Proxy.ServeHTTP(w, r)
