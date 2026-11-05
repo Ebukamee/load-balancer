@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
-	"net/url"
 )
 
 // Config is the whole config file. The `json:"..."` tags say which JSON key
