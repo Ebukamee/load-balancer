@@ -17,6 +17,7 @@ type Config struct {
 	Listen   string   `json:"listen"`   // address to listen on, e.g. ":8080"
 	Backends []string `json:"backends"` // backend URLs, e.g. "http://localhost:7001"
 	Health   Health   `json:"health"`
+	Proxy    Proxy    `json:"proxy"`
 }
 
 // Health holds the health-check settings.
@@ -25,11 +26,22 @@ type Health struct {
 	Timeout  Duration `json:"timeout"`  // how long one check may take, e.g. "2s"
 }
 
+// Proxy holds the settings for forwarding requests to backends.
+type Proxy struct {
+	ConnectTimeout  Duration `json:"connect_timeout"`  // max time to open a connection, e.g. "2s"
+	ResponseTimeout Duration `json:"response_timeout"` // max wait for a backend's reply, e.g. "10s"
+	MaxAttempts     int      `json:"max_attempts"`     // tries per request, counting the first, e.g. 3
+}
+
 // Defaults used when the file leaves a setting out.
 const (
 	DefaultListen   = ":8080"
 	DefaultInterval = 5 * time.Second
 	DefaultTimeout  = 2 * time.Second
+
+	DefaultConnectTimeout  = 2 * time.Second
+	DefaultResponseTimeout = 10 * time.Second
+	DefaultMaxAttempts     = 3
 )
 
 // Load reads the config file at path, fills in defaults for anything left
@@ -69,6 +81,15 @@ func (c *Config) applyDefaults() {
 	if c.Health.Timeout.Duration == 0 {
 		c.Health.Timeout.Duration = DefaultTimeout
 	}
+	if c.Proxy.ConnectTimeout.Duration == 0 {
+		c.Proxy.ConnectTimeout.Duration = DefaultConnectTimeout
+	}
+	if c.Proxy.ResponseTimeout.Duration == 0 {
+		c.Proxy.ResponseTimeout.Duration = DefaultResponseTimeout
+	}
+	if c.Proxy.MaxAttempts == 0 {
+		c.Proxy.MaxAttempts = DefaultMaxAttempts
+	}
 }
 
 // Validate checks every setting and reports ALL problems at once, so the
@@ -105,10 +126,17 @@ func (c *Config) Validate() error {
 	if c.Health.Timeout.Duration >= c.Health.Interval.Duration {
 		errs = append(errs, errors.New("health timeout must be shorter than interval"))
 	}
+	if c.Proxy.ConnectTimeout.Duration <= 0 {
+		errs = append(errs, errors.New("proxy connect_timeout must be positive"))
+	}
+	if c.Proxy.MaxAttempts < 1 {
+		errs = append(errs, errors.New("proxy max_attempts must be at least 1"))
+	}
+	if c.Proxy.ResponseTimeout.Duration <= 0 {
+		errs = append(errs, errors.New("proxy response_timeout must be positive"))
+	}
 
 	return errors.Join(errs...)
-
-	// Then run: go test ./internal/config -v -run Validate
 
 }
 

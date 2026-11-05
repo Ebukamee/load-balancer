@@ -62,6 +62,29 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Health.Timeout.Duration != DefaultTimeout {
 		t.Errorf("Timeout = %v, want default %v", cfg.Health.Timeout.Duration, DefaultTimeout)
 	}
+	if cfg.Proxy.MaxAttempts != DefaultMaxAttempts {
+		t.Errorf("MaxAttempts = %d, want default %d", cfg.Proxy.MaxAttempts, DefaultMaxAttempts)
+	}
+	if cfg.Proxy.ResponseTimeout.Duration != DefaultResponseTimeout {
+		t.Errorf("ResponseTimeout = %v, want default %v", cfg.Proxy.ResponseTimeout.Duration, DefaultResponseTimeout)
+	}
+}
+
+func TestLoadProxySettings(t *testing.T) {
+	path := writeFile(t, `{
+		"backends": ["http://localhost:7001"],
+		"proxy": {"connect_timeout": "1s", "response_timeout": "30s", "max_attempts": 2}
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Proxy.ConnectTimeout.Duration != time.Second ||
+		cfg.Proxy.ResponseTimeout.Duration != 30*time.Second ||
+		cfg.Proxy.MaxAttempts != 2 {
+		t.Errorf("Proxy = %+v, want connect 1s, response 30s, attempts 2", cfg.Proxy)
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
@@ -117,6 +140,11 @@ func validConfig() Config {
 			Interval: Duration{5 * time.Second},
 			Timeout:  Duration{2 * time.Second},
 		},
+		Proxy: Proxy{
+			ConnectTimeout:  Duration{2 * time.Second},
+			ResponseTimeout: Duration{10 * time.Second},
+			MaxAttempts:     3,
+		},
 	}
 }
 
@@ -138,6 +166,9 @@ func TestValidate(t *testing.T) {
 		{"zero interval", func(c *Config) { c.Health.Interval = Duration{0} }, "health interval must be positive"},
 		{"negative timeout", func(c *Config) { c.Health.Timeout = Duration{-time.Second} }, "health timeout must be positive"},
 		{"timeout too long", func(c *Config) { c.Health.Timeout = Duration{5 * time.Second} }, "health timeout must be shorter than interval"},
+		{"negative connect timeout", func(c *Config) { c.Proxy.ConnectTimeout = Duration{-time.Second} }, "proxy connect_timeout must be positive"},
+		{"negative response timeout", func(c *Config) { c.Proxy.ResponseTimeout = Duration{-time.Second} }, "proxy response_timeout must be positive"},
+		{"negative attempts", func(c *Config) { c.Proxy.MaxAttempts = -1 }, "proxy max_attempts must be at least 1"},
 	}
 
 	for _, tt := range tests {

@@ -8,5 +8,10 @@
   "health": {
     "interval": "5s",
     "timeout": "2s"
+  },
+  "proxy": {
+    "connect_timeout": "2s",
+    "response_timeout": "10s",
+    "max_attempts": 3
   }
 }
