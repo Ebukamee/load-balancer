@@ -28,7 +28,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	backends, err := buildBackends(cfg.Backends)
+	backends, err := buildBackends(cfg.Backends, proxy.Options{
+		ConnectTimeout:  cfg.Proxy.ConnectTimeout.Duration,
+		ResponseTimeout: cfg.Proxy.ResponseTimeout.Duration,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,7 +42,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           lb.NewHandler(balancer.NewRoundRobin(backends)),
+		Handler:           lb.NewHandler(balancer.NewRoundRobin(backends), cfg.Proxy.MaxAttempts),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("load balancer listening on %s with %d backends (config %s)", cfg.Listen, len(backends), *configPath)
@@ -48,14 +51,14 @@ func main() {
 
 // buildBackends turns validated backend URLs into backends, each with its
 // own reverse proxy.
-func buildBackends(urls []string) ([]*backend.Backend, error) {
+func buildBackends(urls []string, opts proxy.Options) ([]*backend.Backend, error) {
 	var backends []*backend.Backend
 	for _, raw := range urls {
 		u, err := url.Parse(raw)
 		if err != nil {
 			return nil, fmt.Errorf("backend %q: %w", raw, err)
 		}
-		backends = append(backends, &backend.Backend{URL: u, Proxy: proxy.NewHandler(u)})
+		backends = append(backends, &backend.Backend{URL: u, Proxy: proxy.NewHandler(u, opts)})
 	}
 	return backends, nil
 }
