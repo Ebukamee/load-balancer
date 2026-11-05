@@ -37,7 +37,8 @@ const (
 // names the file.
 func Load(path string) (*Config, error) {
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from the operator's -config flag, not from clients
+
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
