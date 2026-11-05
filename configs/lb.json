@@ -1,0 +1,12 @@
+{
+  "listen": ":8080",
+  "backends": [
+    "http://localhost:7001",
+    "http://localhost:7002",
+    "http://localhost:7003"
+  ],
+  "health": {
+    "interval": "5s",
+    "timeout": "2s"
+  }
+}
